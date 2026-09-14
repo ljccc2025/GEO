@@ -1,0 +1,16 @@
+# ── 上游参考仓库（外部克隆，不属于本项目）──────────────────
+/GEOFlow/
+/GEORank/
+/elmo/
+/getcito/
+/AutoGEO/
+/eGEOagents/
+/geo-optimizer-skill/
+/geo-optimizer-go/
+/notfair-plugin/
+
+# ── 克隆与 OCR 日志 ──────────────────────────────────────
+/_logs/
+
+# ── 头脑风暴视觉伴侣产物 ─────────────────────────────────
+/.superpowers/
