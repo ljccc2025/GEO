@@ -47,7 +47,10 @@
 - 技术选型：以开源项目 **GEOFlow** 为底座，二次开发成内部作战平台
 - 部署形态：公司服务器 / Docker Compose / 内网访问 / 企业级
 
-下一步：编写实现计划（M0 部署上线 → M1 海外引擎接入 → M2 公司档案与结构化 Schema）。
+下一步：执行实现计划（M0 部署上线 → M1 海外引擎接入 → M2 公司档案与结构化 Schema）。
+
+**代码仓库**：二次开发的代码改动提交到 fork —— https://github.com/ljccc2025/GEOFlow
+（分支 `feat/overseas-visibility-engines`，上游为 `yaojingang/GEOFlow`）
 
 ---
 
@@ -56,6 +59,7 @@
 | 文档 | 内容 |
 |---|---|
 | `docs/GEO-技术方案与架构文档.md` | **全栈技术方案与架构文档**（需求分析、技术选型决策矩阵、16 个模块详设、工程化指南、安全模型） |
+| `docs/superpowers/plans/2026-09-14-overseas-visibility-engines.md` | **海外引擎接入实现计划**（M0 前置 + 4 个任务组，含完整代码与测试） |
 | `docs/superpowers/specs/2026-09-14-geo-platform-design.md` | **子项目 1 设计规格**（架构、二次开发范围、数据流、部署、测试验收、风险） |
 | `GEO-开源项目调研.md` | 9 个开源 GEO 项目的横向调研与选型依据 |
 | `GEO-最终方案.md` | 三个子项目的整体方案与技术选型 |
