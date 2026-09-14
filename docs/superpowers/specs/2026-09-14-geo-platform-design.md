@@ -137,11 +137,26 @@ GEOFlow 是 AGPL-3.0。本项目的用法：
 
 Docker Compose，公司服务器，内网访问。
 
-| 类别 | 容器 |
+`docker-compose.prod.yml` 定义 **12 个服务**，默认副本下共 **13 个进程**。
+
+| 类别 | 服务 | 默认进程数 |
+|---|---|---|
+| 基础 | `postgres`(pgvector) · `redis` · `init` · `app` · `web` | 5 |
+| 队列 worker | `queue` · `ai-quality-queue` · `ai-quality-backfill-queue` · `ai-optimization-queue` · `knowledge-queue` | 6 |
+| 其他 | `scheduler` · `reverb` | 2 |
+
+> `ai-quality-queue` 设了 `replicas: ${AI_QUALITY_QUEUE_REPLICAS:-2}`，默认 2 副本，
+> 因此 **5 个 worker 服务对应 6 个进程**。compose 里的 `default` 是**网络名**，不是服务。
+
+**队列监控必须按队列名，不能按容器名** —— 5 个 worker 的命令并不统一：
+
+| 服务 | 实际命令 |
 |---|---|
-| 基础 | `postgres`(pgvector) · `redis` · `init` · `app` · `web` |
-| 队列 worker | `queue` · `ai-quality-queue` · `ai-quality-backfill-queue` · `ai-optimization-queue` · `knowledge-queue` |
-| 其他 | `scheduler` · `reverb` · `default` |
+| `queue` | `queue:work --queue=system-updates,geoflow,distribution,theme-replication,default` |
+| `ai-quality-queue` | `geoflow:work-ai-quality front` |
+| `ai-quality-backfill-queue` | `geoflow:work-ai-quality backfill` |
+| `ai-optimization-queue` | `geoflow:work-ai-optimization` |
+| `knowledge-queue` | `queue:work --queue=knowledge` |
 
 运行要求：PHP 8.3+ / PostgreSQL（pgvector）/ Redis / Node.js（前端资源构建）/ Nginx + php-fpm。
 
@@ -169,7 +184,8 @@ const SAMPLE_PROVIDERS = [DEEPSEEK_ANALYSIS, DOUBAO_ARK_RESPONSES, DOUBAO_SEARCH
 
 | # | 要求 |
 |---|---|
-| R1.1 | 新增**两个**海外引擎采样提供商：**Perplexity**（真实网页检索型）与 **OpenAI**（ChatGPT Search 系） |
+| R1.1 | 新增**两个**海外引擎采样提供商：**Perplexity** 与 **OpenAI**，**两者均建模为检索型 `AiSourceProvider`**。Perplexity 走其自带网页检索的 API；OpenAI 走 Responses API + `web_search` 工具 |
+| R1.1a | **不得**实现为无检索的普通 chat/completions 调用。验收意图是「买手提问时 AI 是否找到并推荐我们」；无检索的模型调用测的是「训练语料里有没有我们」，是另一个问题，且**不产生 `ai_visibility_sources`** —— 而那是信源与引用排名分析的唯一数据来源 |
 | R1.2 | 新增的提供商必须挂进 `AiVisibilityRun::SAMPLE_PROVIDERS`，使既有分析代码自动生效 |
 | R1.3 | 每个新提供商实现为独立 Client 类，遵循既有 Client 的结构与错误处理约定 |
 | R1.4 | 支持在后台配置各引擎的 API 凭据与模型绑定 |
@@ -177,7 +193,10 @@ const SAMPLE_PROVIDERS = [DEEPSEEK_ANALYSIS, DOUBAO_ARK_RESPONSES, DOUBAO_SEARCH
 | R1.6 | 分析用提示词须支持**英文**，不得硬编码中文提示词 |
 | R1.7 | 扩展 `AiProviderEndpointPolicy` 的 HTTPS 域名白名单以放行新增端点 |
 | R1.8 | R1.7 的改动**不得绕过或削弱**既有 SSRF 防护；遵循项目既有安全验证流程 |
-| R1.9 | 复用 `AiSourceProvider` 既有的 `daily_limit` / `used_today` 配额机制做成本控制 |
+| R1.9 | 复用既有配额机制做成本控制：检索型用 `AiSourceProvider` 的 `daily_limit` / `used_today`；若引入模型调用型则用 `AiModel` 的对应字段 |
+| R1.10 | **扩展采集调度**：`AiVisibilityCollectionService::collect()` 目前是 if/else 单路径链，按优先级只走一条。必须让新提供商可被选中。**同一目标问题对两个引擎各采一次**，由既有的 `CollectAiVisibilityKeywordJob` 触发 |
+| R1.11 | **扩展配置解析**：`AiVisibilityConfigurationResolver` 目前只有 `ARK_MODEL_SETTING_KEY` / `DEEPSEEK_MODEL_SETTING_KEY` 两个配置键，且 `searchProvider()` 硬编码 `provider_key = doubao_search_custom`。必须为两个新引擎新增配置键并纳入解析 |
+| R1.12 | R1.10 / R1.11 完成后，`geoflow:ai-visibility:collect` 命令与后台采集入口都能驱动新引擎 |
 
 **自动受益**：8 个引用 `SAMPLE_PROVIDERS` 常量的文件（分析、竞品检测、报表等）无需改动。
 
@@ -199,7 +218,7 @@ const SAMPLE_PROVIDERS = [DEEPSEEK_ANALYSIS, DOUBAO_ARK_RESPONSES, DOUBAO_SEARCH
 | R2.3 | 提供后台界面录入与维护公司档案 |
 | R2.4 | 新增独立服务，把公司档案渲染为 Organization JSON-LD |
 | R2.5 | 站点生成时注入完整的 Organization JSON-LD，替换现有只有 `name` 的实现 |
-| R2.6 | 生成的 JSON-LD 通过 Schema.org 结构校验 |
+| R2.6 | 生成的 JSON-LD 必须通过**可执行的**校验：单元测试中对生成的 JSON-LD 做结构断言（字段存在性、类型、`sameAs` 为绝对 URL 数组），并把一份样例提交到 validator.schema.org 的结果留档 |
 
 **`sameAs` 是本开发项最关键字段**：它告诉 AI「LinkedIn 主页、B2B 平台店铺、官网页面是同一家实体」。缺失它，AI 无法把散落各处关于本公司的信息归并为一个实体，也就无法累积成「值得推荐的供应商」。
 
@@ -239,6 +258,7 @@ const SAMPLE_PROVIDERS = [DEEPSEEK_ANALYSIS, DOUBAO_ARK_RESPONSES, DOUBAO_SEARCH
 | 设计获奖记录 | 知识库 **+ 需结构化输出** | **是（R2.2）** |
 | 合作品牌名单 | 知识库 **+ 需结构化输出** | **是（R2.2）** |
 | 案例与素材 | 图片库 / 素材库 / 文章 | 否 |
+| **品牌身份**（公司英文名与别名） | 环境变量 `SITE_NAME` / `SITE_FULL_NAME` / `APP_NAME` / `SITE_URL` | **是（见 §6.4）** |
 
 **结论**：载体够用。只有「获奖」和「合作品牌」因为需要**结构化输出**而需要开发。
 
@@ -246,8 +266,42 @@ const SAMPLE_PROVIDERS = [DEEPSEEK_ANALYSIS, DOUBAO_ARK_RESPONSES, DOUBAO_SEARCH
 
 | # | 限制 | 处理 |
 |---|---|---|
-| L1 | 目标问题长度限制 **100 字符**（`mb_strlen($keyword) <= 100`） | 记录为约束。一般问句够用；超长多条件问句拆成多条。**暂不修改**，待实际使用后评估 |
+| L1 | 目标问题长度限制 **100 字符**。超长项被**静默过滤**（`filter` 条件，不报错） | 运营侧表现为「勾选了却没采集」。写入运维说明。**暂不修改**，待实际使用后评估 |
 | L2 | 后台采集单次最多选 **50 个**目标问题 | 分批采集 |
+| L3 | 品牌判定为**纯字符串匹配**，非语义识别 | 见 §6.4 |
+
+### 6.4 品牌身份（M0 前置条件，必须最先做）
+
+**这是基线能否成立的前提。**
+
+GEOFlow 判定「AI 是否提及本公司」的实现是**纯字符串匹配**：
+
+```php
+// app/Services/Admin/Analytics/AiVisibilityAnalyticsService.php
+brandAliases()  -> config('geoflow.site_name')      // 默认 'GEOFlow'
+                .  config('geoflow.site_full_name')  // 默认 'GEOFlow'
+                .  'GEOFlow'                         // 硬编码
+                .  config('app.name')
+ownedHosts()    -> config('geoflow.site_url')        // 默认 'http://localhost'
+                .  config('app.url')
+```
+
+**若不配置**，基线测出来的是「AI 是否提及 **GEOFlow**」——一个开源项目的名字，
+而非本公司。基线无意义，AC4 的趋势对比随之失效。
+
+公司当前**没有域名**，因此 `ownedHosts` 为空，判定 **100% 依赖别名字符串**。
+
+**要求**：
+
+| # | 要求 |
+|---|---|
+| R6.1 | 配置 `SITE_NAME` / `SITE_FULL_NAME` / `APP_NAME` 为**公司英文名及其别名**（§6.4 的别名列表必须覆盖海外买手可能使用的各种写法） |
+| R6.2 | 配置 `SITE_URL` 与 `app.url`；域名确定后更新（`ownedHosts` 用于识别"本站被引用为信源"） |
+| R6.3 | **基线前必须验证匹配生效**：用一条**已知会提及本公司**的问句跑一次采集，确认看板能识别出本品牌。验证不通过则不得进入基线采集 |
+| R6.4 | 明示品牌身份的两个来源的关系：本期以**环境变量**为度量口径（M0）；M2 的「公司档案」是**结构化输出**口径。二者字段应保持同源，M2 完成后评估是否让度量口径也改读公司档案，**本期不做** |
+
+> R6.4 是一个**有意的临时双源**：度量走 env、输出走档案。不做统一的理由是 YAGNI ——
+> 在没有真实数据前，合并两个来源只会增加改动面。
 
 ---
 
@@ -294,7 +348,7 @@ const SAMPLE_PROVIDERS = [DEEPSEEK_ANALYSIS, DOUBAO_ARK_RESPONSES, DOUBAO_SEARCH
 
 ### 8.1 代码级
 
-项目现有 **323 个测试文件**（Feature 176 + Unit 103）+ CI（`.github/workflows/ci.yml`）。新代码必须配套测试，遵循既有惯例（PHPUnit、`tests/Feature` 与 `tests/Unit`）。
+项目现有 **323 个测试文件**（Feature 182 · Unit 119 · PostgreSQL 13 · Support 5 · Fixtures 2 · Performance 1 · 顶层 1）+ CI（`.github/workflows/ci.yml`）。新代码必须配套测试，遵循既有惯例（PHPUnit、`tests/Feature` 与 `tests/Unit`）。
 
 | 被测对象 | 测试类型 | 要求 |
 |---|---|---|
@@ -308,8 +362,8 @@ const SAMPLE_PROVIDERS = [DEEPSEEK_ANALYSIS, DOUBAO_ARK_RESPONSES, DOUBAO_SEARCH
 | # | 验收项 | 阶段 |
 |---|---|---|
 | **AC1** | 能用海外引擎跑通一次完整采样，结果入库并在看板显示 | M1 |
-| **AC2** | **基线落库**：记录项目起点时「AI 是否提及本公司」的状态 | M1 |
-| **AC3** | 分发站点的 Organization JSON-LD 通过 Schema 校验，且含 `sameAs` / `award` / `brand` | M2 |
+| **AC2** | **基线落库**：记录项目起点时「AI 是否提及本公司」的状态。**前置依赖**：§6.4 的品牌身份已配置，且 R6.3 的匹配验证已通过 | M1 |
+| **AC3** | 分发站点的 Organization JSON-LD 通过 §8.1 的单元测试断言与 validator.schema.org 人工校验（结果留档），且含 `sameAs` / `award` / `brand` | M2 |
 | **AC4** | 目标问题的**可见率相对基线产生可观测变化**，按周采样观察趋势 | M2 后 |
 
 **AC4 不设固定数值阈值**：基线尚未测量，任何阈值都是无依据的猜测。先建立趋势曲线，待数据充分后再设定目标值。
@@ -328,13 +382,21 @@ const SAMPLE_PROVIDERS = [DEEPSEEK_ANALYSIS, DOUBAO_ARK_RESPONSES, DOUBAO_SEARCH
 
 | # | 里程碑 | 内容 | 产出 |
 |---|---|---|---|
+| **M0** | 部署上线 + 品牌身份 | 部署 GEOFlow、验证 A1 网络连通、配置品牌别名与自有域名（§6.4） | 可用实例 + 品牌判定生效 |
 | **M1** | 海外引擎接入 | 开发项 1 + 测试 | 度量能力 + 项目基线 |
 | **M2** | 公司档案 + 结构化 Schema | 开发项 2 + 测试 | 结构化产出能力 |
 | **M3** | 品牌化 + 业务模板 | 开发项 3、4 | 可投入日常运营 |
 
 **顺序依据**：不先建立度量能力，后续所有改动都无法判断是否有效。M1 同时产出项目基线，这是后续一切对比的起点。
 
-**实现计划的范围**：M3（品牌化、业务模板）本质是**后台配置与内容录入**，不是编码工作，因此**不进入实现计划**。实现计划覆盖 M1 与 M2，按 M1 优先分阶段编排。
+**M0 为什么必须是第一步**：AC1 / AC2 都依赖一个跑起来的实例；而 AC2 的基线更依赖 §6.4 的品牌身份配置——
+品牌别名没配好，采到的基线是「AI 是否提及 GEOFlow」，等于没测。
+
+**实现计划的范围**：实现计划覆盖 **M0 → M1 → M2**。
+
+M3（业务模板、视觉品牌化）本质是**后台内容录入与外观调整**，不是编码工作，**不进入实现计划**。
+但注意区分：§6.4 的「品牌身份」（环境变量配置）属于 **M0**，是度量正确性的前提，**必须进计划**；
+M3 里的「logo / 配色」才是纯配置项。
 
 ---
 
@@ -342,10 +404,10 @@ const SAMPLE_PROVIDERS = [DEEPSEEK_ANALYSIS, DOUBAO_ARK_RESPONSES, DOUBAO_SEARCH
 
 | # | 风险 | 影响 | 应对 |
 |---|---|---|---|
-| **R-1** | 公司服务器无法访问海外 API（A1 未验证） | M1 无法落地 | M1 第一步验证；不成立则先解决网络条件 |
-| **R-2** | 海外 API 成本不可控 | 可见性采样是定时任务，费用随时间累积 | 复用 `AiSourceProvider` 的 `daily_limit` 配额机制；上线前估算月成本 |
+| **R-1** | 公司服务器无法访问海外 API（A1 未验证） | M1 无法落地 | **M0 第一步验证**（§9）；不成立则先解决网络条件，M1 阻塞 |
+| **R-2** | 海外 API 成本不可控 | 可见性采样是定时任务，费用随时间累积 | 复用既有配额机制（检索型 `AiSourceProvider` / 模型型 `AiModel`，见 R1.9）；上线前估算月成本 |
 | **R-3** | 扩白名单引入 SSRF 风险 | 安全 | 严格按项目既有安全流程，不绕过防护；配套单元测试（见 §8.1） |
-| **R-4** | 6 个队列 worker 无监控导致任务静默积压 | 内容生产与采集停摆 | 部署后必须配置队列积压监控 |
+| **R-4** | 队列 worker 无监控导致任务静默积压 | 内容生产与采集停摆 | 部署后配置积压监控，**按队列名而非容器名**（见 §4.4）；5 个 worker 服务默认 6 进程 |
 | **R-5** | 上游 GEOFlow 迭代快（近两月 408 次提交），定制难以跟进 | 长期维护成本 | 定制尽量收敛到**新文件**；对上游文件的改动保持最小化（如 §5.2 的定点替换） |
 | **R-6** | 业务信息（P6）入职后可能与设计假设冲突 | 需调整配置层 | 已通过配置化设计化解；冲突时只改数据不改代码 |
 
@@ -389,6 +451,11 @@ const SAMPLE_PROVIDERS = [DEEPSEEK_ANALYSIS, DOUBAO_ARK_RESPONSES, DOUBAO_SEARCH
 | 目标问题经关键词库、限 50 条、限 100 字符 | `app/Http/Controllers/Admin/AiVisibilityAnalyticsController.php` L73-86 |
 | 提供商配额机制 | `app/Models/AiSourceProvider.php` `$fillable` |
 | 后台支持简体中文 | `lang/zh_CN/` |
-| 13 个容器（含 6 个队列 worker） | `docker-compose.prod.yml` |
-| 323 个测试文件 | `tests/` 实测 |
+| 12 个服务、默认 13 进程、5 个 worker 服务（6 进程） | `docker-compose.prod.yml` |
+| 323 个测试文件（Feature 182 · Unit 119 · PostgreSQL 13 · Support 5 · Fixtures 2 · Performance 1 · 顶层 1） | `tests/` 实测 |
 | 8 个文件引用 `SAMPLE_PROVIDERS` | 全仓库 grep |
+| 品牌判定为纯字符串匹配，默认值为 GEOFlow / localhost | `app/Services/Admin/Analytics/AiVisibilityAnalyticsService.php` `brandAliases()` L940-959、`ownedHosts()` L964-975 |
+| 品牌配置项与默认值 | `config/geoflow.php` L76-80 |
+| 采样调度为单路径 if/else 链 | `AiVisibilityCollectionService::collect()` L20-67 |
+| 配置解析仅 2 个配置键，搜索源硬编码 `doubao_search_custom` | `app/Services/GeoFlow/AiVisibility/AiVisibilityConfigurationResolver.php` L15-40 |
+| 超长目标问题为静默过滤 | `AiVisibilityAnalyticsController` L73-86 |
